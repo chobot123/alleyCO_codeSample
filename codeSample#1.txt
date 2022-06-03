@@ -111,7 +111,16 @@ exports.refresh_token = async function(req, res) {
 }
 
 ----------------------------------------------------- FRONT END (REACT) -----------------------------------------------------------------------
-axios.interceptors.response.use((response) => {
+ //Set credentials and headers (to send access and refresh tokens)
+  axios.defaults.withCredentials = true;
+  axios.defaults.headers.common['authorization'] = 'Bearer ' + user.accessToken;
+
+  /**
+   * Intercepts the 'verifyToken' middleware from server and if
+   * there is an error, verifies if there is a valid refresh token, and if so,
+   * updates parameters, and sends said parameters back with the original HTTP request
+   */
+  axios.interceptors.response.use((response) => {
     return response;
   }, async (error) => {
     const originalRequest = error.config;
@@ -132,3 +141,33 @@ axios.interceptors.response.use((response) => {
       throw error;
     }
   });
+
+  // Verify refresh token and update state on mount
+  useEffect(() => {
+
+    async function checkRefreshToken() {
+      await axios.post('/api/auth/refresh_token')
+      .then((token) => {
+        if(!token.data.user){
+          setUser({
+            accessToken: "",
+            username: "",
+            id: ""
+          })
+        }
+        else {
+          setUser({
+            accessToken: token.data.accessToken,
+            id: token.data.user._id,
+            username: token.data.user.username,
+          })
+        }
+      })
+      .catch((err) => {
+        console.log(err)
+      })
+    }
+
+    checkRefreshToken(); 
+
+  }, [])
