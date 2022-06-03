@@ -1,0 +1,134 @@
+------------------------------------------------------------------ BACKEND (NODE/EXPRESS) --------------------------------------------------------------------
+function verifyToken(req, res, next) {
+
+    const authHeader = req.headers['authorization']
+    const token = authHeader && authHeader.split(' ')[1]
+    if (token == null) return res.sendStatus(401)
+
+    jwt.verify(token, process.env.JWT_SECRET_KEY, (err, user) => {
+      if (err) {
+        return res.sendStatus(401);
+      }
+      req.authData = user;
+      next()
+    })
+}
+
+function generateAccessToken(user) {
+  return jwt.sign({_id: user._id, username: user.username}, process.env.JWT_SECRET_KEY, { expiresIn: '15m' })
+}
+
+function generateRefreshToken(user) {
+    return jwt.sign({_id: user._id, username: user.username}, process.env.JWT_REFRESH_KEY, {expiresIn: '24h'});
+}
+
+/**
+ * Checks if the HTTP request comes with a valid (In DB and exists) refresh token, decodes the refresh token, validates
+ * the information from the decoded token, and issues a new refresh and access token
+ * 
+ * @param {Object} req The HTTP request with properties for the request query [string, parameters, body, headers, etc.]
+ * @param {Object} res The HTTP response that the Express app sends when it gets an HTTP request
+ * @returns {JSON}      {accessToken,
+                            user: { _id: user._id, 
+                                    username: user.username
+                                } 
+                            }
+ */
+
+exports.refresh_token = async function(req, res) {
+
+    const token = req.cookies.refreshToken;
+    let checkValid = await Refresh.find({"token": token});
+
+    //Deletes the access/refresh token if there's no token or the token doesn't exist in the DB
+    if(!token || checkValid.length === 0) {
+        res.clearCookie("refreshToken");
+        return res.send({ accessToken: ''});
+    }
+
+    /**
+     * Verifies the refresh token and if theres an error, revoke the access token
+     * 
+     * @param {Object} token                        The refresh token from the request cookies
+     * @param {String} process.env.JWT_REFRESH_KEY  The secret key validating the refresh token
+     * @param {Object} err                          The error parameter of the CB function 
+     * @param {Object} user                         The decoded token object parameter of the CB function
+      */
+
+    jwt.verify(token, process.env.JWT_REFRESH_KEY, (err, user) => {
+
+        //if there is an error ?=== no refresh token/wrong refresh token, delete tokens
+        if(err) {
+            Refresh.findOneAndDelete({"token": token})
+            .exec();
+            res.clearCookie("refreshToken");
+            return res.send({ accessToken: ''});
+        }
+
+        // Checks if user exists in the DB, and if it doesn't, revoke access
+        User.find({"username": user.username})
+        .exec((err, user) => {
+            if(err || !user) {
+                res.clearCookie("refreshToken");
+                return res.send({ accessToken: ''});
+            }
+        })
+
+        // New access and refresh tokens
+        const accessToken = generateAccessToken(user);
+        const refreshToken = generateRefreshToken(user);
+
+    
+
+        // 6) Update in DB
+        Refresh.findOneAndUpdate(
+            {
+                "token": token,
+            },
+            {
+                "token": refreshToken,
+            }
+        )
+        .exec((err) => {
+            if(err) {
+                res.clearCookie("refreshToken");
+                return res.send({ accessToken: ''});
+            }
+        })
+
+        res.cookie('refreshToken', refreshToken, {
+            httpOnly: true,
+            path: 'api/auth/refresh_token',
+            secure: false,
+        })
+
+        res.send({
+            accessToken,
+            user: {_id: user._id, username: user.username} 
+        });
+        
+    })
+}
+
+----------------------------------------------------- FRONT END (REACT) -----------------------------------------------------------------------
+axios.interceptors.response.use((response) => {
+    return response;
+  }, async (error) => {
+    const originalRequest = error.config;
+    if(error.response.status === 401) {
+      return  await axios.post('/api/auth/refresh_token')
+              .then((res) => {
+                if(res.status === 200) {
+                  setUser({
+                    accessToken: res.data.accessToken,
+                    id: res.data.user._id,
+                  })
+                  originalRequest.headers['authorization'] = 'Bearer ' + res.data.accessToken;
+                  return axios.request(originalRequest);
+                }
+              })
+    }
+    else {
+      throw error;
+    }
+  });
